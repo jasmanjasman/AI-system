@@ -1,0 +1,30 @@
+# docker-compose.yml — dev stack for the toolbox API
+services:
+  api:
+    build:
+      context: .
+    image: toolbox-api:dev
+    # Host port comes from .env (APP_PORT), container always listens on 8000.
+    # Host 8000 is taken by ChromaDB, which is why the default here is 8001.
+    ports:
+      - "${APP_PORT:-8001}:8000"
+    environment:
+      # NOTE: inside a container, "localhost" is the container itself — NOT your host.
+      # llama-server runs on the host, so it must be reached via host.docker.internal.
+      LLAMA_BASE_URL: ${LLAMA_BASE_URL_DOCKER:-http://host.docker.internal:8085/v1}
+      LLAMA_MODEL: ${LLAMA_MODEL:-qwen3}
+      LLAMA_TIMEOUT: ${LLAMA_TIMEOUT:-120}
+    extra_hosts:
+      # Makes host.docker.internal resolve to the host on Linux/WSL2
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Live code reload in dev; the image still holds a full copy for prod runs.
+      - ./app:/app/app:ro
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
