@@ -59,18 +59,18 @@ llama: ## Start the llama.cpp model server (occupies this terminal)
 		--threads 4
 
 check-llama: ## Check the model server is up and speaking the OpenAI API
-	@curl -sf --max-time 5 $(LLAMA_BASE_URL)/models && echo \
+	@curl -s --max-time 5 $(LLAMA_BASE_URL)/models && echo \
 		|| echo $(LLAMA_DOWN_MSG)
 
 run: ## Start the app locally (occupies this terminal)
 	uvicorn app.main:app --reload --host $(APP_HOST) --port $(APP_PORT)
 
 health: ## Check the app is responding
-	@curl -sf --max-time 5 $(APP_URL)/health && echo \
+	@curl -s --max-time 5 $(APP_URL)/health && echo \
 		|| echo $(DOWN_MSG)
 
 chat: ## Send a test prompt through the app
-	@curl -sf --max-time 120 -X POST $(APP_URL)/chat/raw \
+	@curl -s --max-time 120 -X POST $(APP_URL)/chat/raw \
 		-H "Content-Type: application/json" \
 		-d '{"prompt": "Say hello in one word"}' && echo \
 		|| echo $(DOWN_MSG)
