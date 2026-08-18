@@ -56,7 +56,8 @@ llama: ## Start the llama.cpp model server (occupies this terminal)
 		--n-gpu-layers -1 \
 		--ctx-size 8192 \
 		--batch-size 1024 \
-		--threads 4
+		--threads 4 \
+		--jinja
 
 check-llama: ## Check the model server is up and speaking the OpenAI API
 	@curl -s --max-time 5 $(LLAMA_BASE_URL)/models && echo \
@@ -69,10 +70,10 @@ health: ## Check the app is responding
 	@curl -s --max-time 5 $(APP_URL)/health && echo \
 		|| echo $(DOWN_MSG)
 
-chat: ## Send a test prompt through the app
-	@curl -s --max-time 120 -X POST $(APP_URL)/chat/raw \
+chat: ## Send a test prompt through the app (exercises the tool loop)
+	@curl -s --max-time 120 -X POST $(APP_URL)/chat \
 		-H "Content-Type: application/json" \
-		-d '{"prompt": "Say hello in one word"}' && echo \
+		-d '{"prompt": "What is 23 * 47?"}' && echo \
 		|| echo $(DOWN_MSG)
 
 docs: ## Print the interactive API docs URL
