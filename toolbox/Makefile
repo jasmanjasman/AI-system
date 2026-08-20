@@ -2,7 +2,7 @@
 # Run `make` (or `make help`) to see everything available.
 
 .DEFAULT_GOAL := help
-.PHONY: help install config check-llama llama run health chat docs up down logs ps rebuild
+.PHONY: help install install-dev test config check-llama llama run health chat docs up down logs ps rebuild
 
 # Single source of truth: .env. Missing file is fine — the defaults below apply.
 # .env wins over the shell environment, so for a one-off override use make's own
@@ -13,6 +13,8 @@ export
 # ?= only fills in what .env did not already define.
 LLAMA_BASE_URL   ?= http://localhost:8085/v1
 LLAMA_MODEL      ?= qwen3
+# Some systems only ship `python3`; override with `make test PYTHON=python`.
+PYTHON           ?= python3
 APP_HOST         ?= 127.0.0.1
 APP_PORT         ?= 8001
 
@@ -41,6 +43,12 @@ help: ## Show this help
 
 install: ## Install Python dependencies
 	pip install -r requirements.txt
+
+install-dev: ## Install dependencies including the test tooling
+	pip install -r requirements-dev.txt
+
+test: ## Run the test suite (no model server needed — llama.cpp is stubbed)
+	$(PYTHON) -m pytest -q
 
 config: ## Show effective settings (run this first when something looks wrong)
 	@echo "LLAMA_BASE_URL = $(LLAMA_BASE_URL)"
