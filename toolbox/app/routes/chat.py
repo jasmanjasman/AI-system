@@ -2,10 +2,15 @@ import json
 from typing import Any
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 from app.dependencies import get_llama_client
 
 router = APIRouter()
+
+
+class ChatRequest(BaseModel):
+    prompt: str
 
 
 def calculator(expression: str) -> str:
@@ -31,10 +36,10 @@ CALCULATOR_TOOL = {
 }
 
 @router.post("/chat")
-async def chat(prompt: str) -> dict[str, Any]:
+async def chat(request: ChatRequest) -> dict[str, Any]:
     client = get_llama_client()
 
-    messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+    messages: list[dict[str, Any]] = [{"role": "user", "content": request.prompt}]
     tools = [CALCULATOR_TOOL]
 
     assistant_msg = await client.chat_with_tools(messages, tools)
