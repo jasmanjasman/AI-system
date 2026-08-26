@@ -200,3 +200,40 @@ def test_unknown_tool_is_checked_before_validation(registry):
 
     with pytest.raises(UnknownToolError):
         dispatch(registry, "math.nope", {"expression": 5})
+
+
+# --- schema checking at registration --------------------------------------
+# A provider that publishes a schema which is not valid JSON Schema is a
+# programming error, not something a model can recover from. Catching it in
+# register() turns a 500 on some later request into a failure at startup.
+
+BROKEN_SCHEMA = {"type": "not-a-real-type"}
+
+
+def test_a_broken_schema_is_rejected_at_registration(registry):
+    with pytest.raises(ValueError, match="invalid input_schema"):
+        registry.register(FakeProvider("bad", ["tool"], schema=BROKEN_SCHEMA))
+
+
+def test_the_rejection_names_the_offending_tool(registry):
+    with pytest.raises(ValueError) as excinfo:
+        registry.register(FakeProvider("bad", ["tool"], schema=BROKEN_SCHEMA))
+
+    assert "bad.tool" in str(excinfo.value)
+
+
+def test_a_broken_schema_leaves_nothing_behind(registry):
+    """Same rollback guarantee as a duplicate name: all or nothing."""
+    with pytest.raises(ValueError):
+        registry.register(FakeProvider("bad", ["ok", "broken"], schema=BROKEN_SCHEMA))
+
+    assert registry.list_all() == []
+    registry.register(FakeProvider("bad", ["ok"]))  # namespace is not burned
+
+
+def test_dispatch_never_raises_a_raw_schema_error(registry):
+    """Whatever reaches dispatch is a schema the registry already checked."""
+    registry.register(CalculatorProvider())
+
+    with pytest.raises(ToolValidationError):
+        dispatch(registry, "math.calculator", {"expression": 5})

@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 import jsonschema
+from jsonschema.validators import validator_for
 
 from app.tools.contracts import ToolProvider, ToolSpec
 
@@ -37,6 +38,7 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, ToolProvider] = {}
         self._specs: dict[str, ToolSpec] = {}
+        self._validators: dict[str, Any] = {}
 
     def register(self, provider: ToolProvider) -> None:
         ns = provider.namespace
@@ -44,27 +46,48 @@ class ToolRegistry:
             raise ValueError(f"namespace '{ns}' already registered")
 
         # Collect first, commit second: a provider that names two tools the
-        # same must leave the registry exactly as it was.
+        # same — or publishes a schema that is not valid JSON Schema — must
+        # leave the registry exactly as it was.
         specs: dict[str, ToolSpec] = {}
+        validators: dict[str, Any] = {}
         for spec in provider.list_tools():
             qname = f"{ns}.{spec.name}"
             if qname in self._specs or qname in specs:
                 raise ValueError(f"duplicate tool '{qname}'")
             specs[qname] = spec
+            validators[qname] = self._compile(qname, spec)
 
         self._providers[ns] = provider
         self._specs.update(specs)
+        self._validators.update(validators)
         logger.info(
             "provider registered",
             extra={"namespace": ns, "tool_count": len(specs)},
         )
 
+    @staticmethod
+    def _compile(qualified_name: str, spec: ToolSpec) -> Any:
+        """Check a tool's schema once and keep the validator built from it.
+
+        Checking here means a provider that publishes a broken schema fails
+        at startup, where the traceback names it, instead of on whichever
+        request first happens to call that tool. Keeping the validator also
+        takes schema compilation off the per-call path.
+        """
+        cls = validator_for(spec.input_schema)
+        try:
+            cls.check_schema(spec.input_schema)
+        except jsonschema.SchemaError as exc:
+            raise ValueError(
+                f"tool '{qualified_name}' has an invalid input_schema: {exc.message}"
+            ) from exc
+        return cls(spec.input_schema)
+
     def list_all(self) -> list[tuple[str, ToolSpec]]:
         """Every tool as (qualified_name, spec), in registration order."""
         return list(self._specs.items())
 
-    @staticmethod
-    def _validate(spec: ToolSpec, args: dict[str, Any]) -> None:
+    def _validate(self, qualified_name: str, args: dict[str, Any]) -> None:
         """Check the model's arguments against the tool's declared schema.
 
         Raises ToolValidationError so the route can answer in text: a model
@@ -72,7 +95,7 @@ class ToolRegistry:
         point of declaring input_schema in the first place.
         """
         try:
-            jsonschema.validate(instance=args, schema=spec.input_schema)
+            self._validators[qualified_name].validate(args)
         except jsonschema.ValidationError as exc:
             raise ToolValidationError(exc.message) from exc
 
@@ -87,6 +110,6 @@ class ToolRegistry:
 
         # Validate BEFORE the provider runs: a provider should only ever see
         # arguments that match the schema it published.
-        self._validate(self._specs[qualified_name], args)
+        self._validate(qualified_name, args)
 
         return await self._providers[namespace].call(bare_name, args)
