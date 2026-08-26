@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from app.dependencies import get_llama_client, get_registry
 from app.tools.contracts import ToolSpec
-from app.tools.registry import ToolRegistry, UnknownToolError
+from app.tools.registry import ToolRegistry, ToolValidationError, UnknownToolError
 
 router = APIRouter()
 
@@ -59,6 +59,10 @@ async def chat(request: ChatRequest) -> dict[str, Any]:
             result = await registry.dispatch(qualified, fn_args)
         except UnknownToolError:
             result = f"unknown tool: {qualified}"      # tell the LLM, let it recover
+        except ToolValidationError as exc:
+            # Hand the specific schema failure back: a model that reads
+            # "5 is not of type 'string'" can retry the same tool correctly.
+            result = f"invalid arguments for {qualified}: {exc}"
 
         messages.append({
             "role": "tool",

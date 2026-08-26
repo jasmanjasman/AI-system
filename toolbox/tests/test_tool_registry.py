@@ -8,19 +8,24 @@ import pytest
 
 from app.tools.contracts import ToolProvider, ToolSpec
 from app.tools.providers.calculator import CalculatorProvider
-from app.tools.registry import ToolRegistry, UnknownToolError
+from app.tools.registry import ToolRegistry, ToolValidationError, UnknownToolError
 
 
-def spec(name):
-    return ToolSpec(name=name, description=f"the {name} tool", input_schema={"type": "object"})
+def spec(name, schema=None):
+    return ToolSpec(
+        name=name,
+        description=f"the {name} tool",
+        input_schema=schema or {"type": "object"},
+    )
 
 
 class FakeProvider(ToolProvider):
     """Records what it was asked to run, so dispatch routing is observable."""
 
-    def __init__(self, namespace, tool_names):
+    def __init__(self, namespace, tool_names, schema=None):
         self._namespace = namespace
         self._tool_names = tool_names
+        self._schema = schema
         self.calls = []
 
     @property
@@ -28,7 +33,7 @@ class FakeProvider(ToolProvider):
         return self._namespace
 
     def list_tools(self):
-        return [spec(n) for n in self._tool_names]
+        return [spec(n, self._schema) for n in self._tool_names]
 
     async def call(self, tool_name, args):
         self.calls.append((tool_name, args))
@@ -138,3 +143,60 @@ def test_dispatch_does_not_swallow_the_provider_reply(registry):
 
     assert dispatch(registry, "math.calculator", {"expression": "1/0"}).startswith("error:")
     assert dispatch(registry, "math.calculator", {"expression": "23 * 47"}) == "1081"
+
+
+# --- argument validation --------------------------------------------------
+# A tool publishes an input_schema; the registry holds the model to it, so a
+# provider only ever sees arguments that match what it advertised.
+
+CALC_ARGS = {"expression": "23 * 47"}
+CALC_SCHEMA = CalculatorProvider().list_tools()[0].input_schema
+
+
+def test_valid_arguments_reach_the_provider(registry):
+    registry.register(CalculatorProvider())
+
+    assert dispatch(registry, "math.calculator", CALC_ARGS) == "1081"
+
+
+def test_wrong_argument_type_is_rejected_before_the_provider_runs(registry):
+    provider = FakeProvider("math", ["calculator"], schema=CALC_SCHEMA)
+    registry.register(provider)
+
+    with pytest.raises(ToolValidationError):
+        dispatch(registry, "math.calculator", {"expression": 5})
+
+    assert provider.calls == []  # the provider never saw it
+
+
+def test_missing_required_argument_is_rejected(registry):
+    registry.register(CalculatorProvider())
+
+    with pytest.raises(ToolValidationError, match="required property"):
+        dispatch(registry, "math.calculator", {})
+
+
+def test_validation_error_explains_what_was_wrong(registry):
+    """The message is fed to the model verbatim, so it has to be readable."""
+    registry.register(CalculatorProvider())
+
+    with pytest.raises(ToolValidationError) as excinfo:
+        dispatch(registry, "math.calculator", {"expression": 5})
+
+    assert "not of type 'string'" in str(excinfo.value)
+
+
+def test_permissive_schema_accepts_anything(registry):
+    """A provider that declares no properties opts out of validation."""
+    provider = FakeProvider("echo", ["say"])
+    registry.register(provider)
+
+    assert dispatch(registry, "echo.say", {"anything": [1, 2, 3]}) == "echo:say"
+
+
+def test_unknown_tool_is_checked_before_validation(registry):
+    """An unknown name must not be reported as a schema problem."""
+    registry.register(CalculatorProvider())
+
+    with pytest.raises(UnknownToolError):
+        dispatch(registry, "math.nope", {"expression": 5})

@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import jsonschema
+
 from app.tools.contracts import ToolProvider, ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -13,6 +15,15 @@ class UnknownToolError(Exception):
 
     A typed error so the route can answer the model in text instead of
     letting a raw KeyError become a 500.
+    """
+
+
+class ToolValidationError(Exception):
+    """The model's arguments do not satisfy the tool's input_schema.
+
+    Separate from UnknownToolError because the model should react
+    differently: an unknown tool means 'pick a real tool', a validation
+    error means 'call the same tool again with corrected arguments'.
     """
 
 
@@ -52,6 +63,19 @@ class ToolRegistry:
         """Every tool as (qualified_name, spec), in registration order."""
         return list(self._specs.items())
 
+    @staticmethod
+    def _validate(spec: ToolSpec, args: dict[str, Any]) -> None:
+        """Check the model's arguments against the tool's declared schema.
+
+        Raises ToolValidationError so the route can answer in text: a model
+        that sent the wrong type can read why and retry, which is the whole
+        point of declaring input_schema in the first place.
+        """
+        try:
+            jsonschema.validate(instance=args, schema=spec.input_schema)
+        except jsonschema.ValidationError as exc:
+            raise ToolValidationError(exc.message) from exc
+
     async def dispatch(self, qualified_name: str, args: dict[str, Any]) -> str:
         namespace, _, bare_name = qualified_name.partition(".")
 
@@ -60,5 +84,9 @@ class ToolRegistry:
         if qualified_name not in self._specs:
             logger.warning("unknown tool dispatch", extra={"tool": qualified_name})
             raise UnknownToolError(qualified_name)
+
+        # Validate BEFORE the provider runs: a provider should only ever see
+        # arguments that match the schema it published.
+        self._validate(self._specs[qualified_name], args)
 
         return await self._providers[namespace].call(bare_name, args)
