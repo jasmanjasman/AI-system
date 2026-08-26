@@ -237,3 +237,46 @@ def test_dispatch_never_raises_a_raw_schema_error(registry):
 
     with pytest.raises(ToolValidationError):
         dispatch(registry, "math.calculator", {"expression": 5})
+
+
+# --- error messages the model has to act on -------------------------------
+# The message goes back to the model verbatim, so it must say WHICH argument
+# was wrong, not just that something was.
+
+MULTI_ARG_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "expression": {"type": "string"},
+        "precision": {"type": "integer"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["expression"],
+}
+
+
+@pytest.fixture
+def multi(registry):
+    registry.register(FakeProvider("math", ["calc"], schema=MULTI_ARG_SCHEMA))
+    return registry
+
+
+def test_the_message_names_the_offending_argument(multi):
+    with pytest.raises(ToolValidationError) as excinfo:
+        dispatch(multi, "math.calc", {"expression": "1+1", "precision": "two"})
+
+    assert str(excinfo.value) == "precision: 'two' is not of type 'integer'"
+
+
+def test_the_message_points_into_a_nested_value(multi):
+    with pytest.raises(ToolValidationError) as excinfo:
+        dispatch(multi, "math.calc", {"expression": "1+1", "tags": ["ok", 7]})
+
+    assert str(excinfo.value) == "tags[1]: 7 is not of type 'string'"
+
+
+def test_a_missing_property_is_not_given_a_path(multi):
+    """The message already names the field; a path prefix would just repeat it."""
+    with pytest.raises(ToolValidationError) as excinfo:
+        dispatch(multi, "math.calc", {})
+
+    assert str(excinfo.value) == "'expression' is a required property"

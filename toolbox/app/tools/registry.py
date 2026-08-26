@@ -28,6 +28,21 @@ class ToolValidationError(Exception):
     """
 
 
+def _describe(exc: jsonschema.ValidationError) -> str:
+    """Render a validation failure as something a model can act on.
+
+    exc.message alone says "5 is not of type 'string'" without naming the
+    argument, which is unusable the moment a tool has more than one. Prefix
+    the path to the offending value; a missing-property error already names
+    the field itself and has no path, so it is left alone.
+    """
+    path = "".join(
+        f"[{part}]" if isinstance(part, int) else f".{part}"
+        for part in exc.absolute_path
+    ).lstrip(".")
+    return f"{path}: {exc.message}" if path else exc.message
+
+
 class ToolRegistry:
     """Owns every provider and routes a qualified name to the right one.
 
@@ -97,7 +112,7 @@ class ToolRegistry:
         try:
             self._validators[qualified_name].validate(args)
         except jsonschema.ValidationError as exc:
-            raise ToolValidationError(exc.message) from exc
+            raise ToolValidationError(_describe(exc)) from exc
 
     async def dispatch(self, qualified_name: str, args: dict[str, Any]) -> str:
         namespace, _, bare_name = qualified_name.partition(".")
