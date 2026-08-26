@@ -4,8 +4,9 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.dependencies import get_calculator_provider, get_llama_client
-from app.tools.contracts import ToolProvider, ToolSpec
+from app.dependencies import get_llama_client, get_registry
+from app.tools.contracts import ToolSpec
+from app.tools.registry import ToolRegistry, UnknownToolError
 
 router = APIRouter()
 
@@ -14,31 +15,33 @@ class ChatRequest(BaseModel):
     prompt: str
 
 
-def _spec_to_openai(namespace: str, spec: ToolSpec) -> dict[str, Any]:
+def _spec_to_openai(qualified_name: str, spec: ToolSpec) -> dict[str, Any]:
     """Turn a ToolSpec into the OpenAI function-calling menu entry.
     NOTE the namespaced name 'math.calculator' — this is the F1 naming scheme.
     (The charset/dot issue this creates is a deliberate lesson at M6.)"""
     return {
         "type": "function",
         "function": {
-            "name": f"{namespace}.{spec.name}",
+            "name": qualified_name,
             "description": spec.description,
             "parameters": spec.input_schema,
         },
     }
 
 
-def _build_menu(provider: ToolProvider) -> list[dict[str, Any]]:
-    return [_spec_to_openai(provider.namespace, s) for s in provider.list_tools()]
+def _build_menu(registry: ToolRegistry) -> list[dict[str, Any]]:
+    """Menu built from the REGISTRY — spans ALL providers automatically.
+    Add a provider in dependencies.py and it shows up here for free."""
+    return [_spec_to_openai(qname, spec) for qname, spec in registry.list_all()]
 
 
 @router.post("/chat")
 async def chat(request: ChatRequest) -> dict[str, Any]:
     client = get_llama_client()
-    provider = get_calculator_provider()
+    registry = get_registry()
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": request.prompt}]
-    tools = _build_menu(provider)
+    tools = _build_menu(registry)
 
     assistant_msg = await client.chat_with_tools(messages, tools)
 
@@ -48,15 +51,14 @@ async def chat(request: ChatRequest) -> dict[str, Any]:
 
     messages.append(assistant_msg)
     for call in tool_calls:
-        qualified = call["function"]["name"]
+        qualified = call["function"]["name"]           # "math.calculator"
         fn_args = json.loads(call["function"]["arguments"])
 
-        namespace, _, bare_name = qualified.partition(".")
-
-        if namespace == provider.namespace:
-            result = await provider.call(bare_name, fn_args)
-        else:
-            result = f"unknown namespace: {namespace}"
+        # NO namespace if-branch anymore. Hand the whole thing to the Registry.
+        try:
+            result = await registry.dispatch(qualified, fn_args)
+        except UnknownToolError:
+            result = f"unknown tool: {qualified}"      # tell the LLM, let it recover
 
         messages.append({
             "role": "tool",
