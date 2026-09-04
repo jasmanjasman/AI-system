@@ -9,6 +9,7 @@ class ToolSpec:
     name: str
     description: str
     input_schema: dict[str, Any]
+    required_permission: str | None = None
 
 class ToolProvider(ABC):
     @property

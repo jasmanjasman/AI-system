@@ -6,6 +6,7 @@ from typing import Any
 import jsonschema
 from jsonschema.validators import validator_for
 
+from app.tools.caller import Caller
 from app.tools.contracts import ToolProvider, ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,15 @@ class ToolValidationError(Exception):
     differently: an unknown tool means 'pick a real tool', a validation
     error means 'call the same tool again with corrected arguments'.
     """
+
+class PermissionDeniedError(Exception):
+    """The caller lacks the permission the tool requires.
+
+    Separate from the other two again because the model should react
+    differently once more: retrying will not help, and neither will
+    fixing the arguments. The tool is simply not available to this caller.
+    """
+
 
 
 def _describe(exc: jsonschema.ValidationError) -> str:
@@ -99,8 +109,26 @@ class ToolRegistry:
         return cls(spec.input_schema)
 
     def list_all(self) -> list[tuple[str, ToolSpec]]:
-        """Every tool as (qualified_name, spec), in registration order."""
+        """Every registered tool as (qualified_name, spec), in registration order.
+
+        The unfiltered view: use it for diagnostics and admin listings, not
+        for building a menu — see list_for().
+        """
         return list(self._specs.items())
+
+    def list_for(self, caller: Caller) -> list[tuple[str, ToolSpec]]:
+        """Only the tools this caller may use.
+
+        Filtering the menu is a courtesy to the model, not the security
+        boundary: it stops the model proposing tools that can only be
+        refused. dispatch() re-checks, because a model can name a tool it
+        was never shown.
+        """
+        return [
+            (qname, spec)
+            for qname, spec in self._specs.items()
+            if caller.has(spec.required_permission)
+        ]
 
     def _validate(self, qualified_name: str, args: dict[str, Any]) -> None:
         """Check the model's arguments against the tool's declared schema.
@@ -114,7 +142,7 @@ class ToolRegistry:
         except jsonschema.ValidationError as exc:
             raise ToolValidationError(_describe(exc)) from exc
 
-    async def dispatch(self, qualified_name: str, args: dict[str, Any]) -> str:
+    async def dispatch(self, caller: Caller, qualified_name: str, args: dict[str, Any]) -> str:
         namespace, _, bare_name = qualified_name.partition(".")
 
         # One membership test covers all three ways to be unknown: no dot at
@@ -122,6 +150,26 @@ class ToolRegistry:
         if qualified_name not in self._specs:
             logger.warning("unknown tool dispatch", extra={"tool": qualified_name})
             raise UnknownToolError(qualified_name)
+
+        spec = self._specs[qualified_name]
+
+        # Permission BEFORE validation: a caller who may not use this tool
+        # gets one flat refusal, not a schema critique that maps out the
+        # arguments of a tool they cannot reach. This is the boundary — the
+        # filtered menu upstream is only a hint.
+        if not caller.has(spec.required_permission):
+            logger.warning(
+                "permission denied",
+                extra={
+                    "tool": qualified_name,
+                    "user_id": caller.user_id,
+                    "required": spec.required_permission,
+                },
+            )
+            raise PermissionDeniedError(
+                f"caller '{caller.user_id}' lacks "
+                f"'{spec.required_permission}' for {qualified_name}"
+            )
 
         # Validate BEFORE the provider runs: a provider should only ever see
         # arguments that match the schema it published.

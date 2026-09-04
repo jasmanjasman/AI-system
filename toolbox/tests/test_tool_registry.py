@@ -6,26 +6,38 @@ import asyncio
 
 import pytest
 
+from app.tools.caller import Caller
 from app.tools.contracts import ToolProvider, ToolSpec
 from app.tools.providers.calculator import CalculatorProvider
-from app.tools.registry import ToolRegistry, ToolValidationError, UnknownToolError
+from app.tools.registry import (
+    PermissionDeniedError,
+    ToolRegistry,
+    ToolValidationError,
+    UnknownToolError,
+)
+
+# Most tools here declare no required_permission, so the plainest possible
+# caller can reach them. Permission tests below opt in explicitly.
+ANYONE = Caller.anonymous()
 
 
-def spec(name, schema=None):
+def spec(name, schema=None, permission=None):
     return ToolSpec(
         name=name,
         description=f"the {name} tool",
         input_schema=schema or {"type": "object"},
+        required_permission=permission,
     )
 
 
 class FakeProvider(ToolProvider):
     """Records what it was asked to run, so dispatch routing is observable."""
 
-    def __init__(self, namespace, tool_names, schema=None):
+    def __init__(self, namespace, tool_names, schema=None, permission=None):
         self._namespace = namespace
         self._tool_names = tool_names
         self._schema = schema
+        self._permission = permission
         self.calls = []
 
     @property
@@ -33,7 +45,7 @@ class FakeProvider(ToolProvider):
         return self._namespace
 
     def list_tools(self):
-        return [spec(n, self._schema) for n in self._tool_names]
+        return [spec(n, self._schema, self._permission) for n in self._tool_names]
 
     async def call(self, tool_name, args):
         self.calls.append((tool_name, args))
@@ -45,8 +57,8 @@ def registry():
     return ToolRegistry()
 
 
-def dispatch(registry, name, args=None):
-    return asyncio.run(registry.dispatch(name, args or {}))
+def dispatch(registry, name, args=None, caller=ANYONE):
+    return asyncio.run(registry.dispatch(caller, name, args or {}))
 
 
 def test_empty_registry_has_an_empty_menu(registry):
@@ -280,3 +292,97 @@ def test_a_missing_property_is_not_given_a_path(multi):
         dispatch(multi, "math.calc", {})
 
     assert str(excinfo.value) == "'expression' is a required property"
+
+
+# --- permissions ------------------------------------------------------------
+# A tool declares required_permission; the caller carries what it has. The
+# menu is filtered as a courtesy, but dispatch is the boundary that decides.
+
+READER = Caller(user_id="reader", permissions=frozenset({"files.read"}))
+
+
+@pytest.fixture
+def mixed_registry():
+    """One public tool and one that requires 'files.read'."""
+    registry = ToolRegistry()
+    registry.register(FakeProvider("math", ["calculator"]))
+    registry.register(FakeProvider("fs", ["read"], permission="files.read"))
+    return registry
+
+
+def test_a_tool_is_public_unless_it_asks_for_a_permission():
+    """The ToolSpec default is None, so providers opt IN to being restricted."""
+    assert spec("calculator").required_permission is None
+    assert ANYONE.has(spec("calculator").required_permission)
+
+
+def test_menu_hides_what_the_caller_may_not_use(mixed_registry):
+    assert [q for q, _ in mixed_registry.list_for(ANYONE)] == ["math.calculator"]
+
+
+def test_menu_shows_the_restricted_tool_to_a_caller_who_holds_it(mixed_registry):
+    assert [q for q, _ in mixed_registry.list_for(READER)] == ["math.calculator", "fs.read"]
+
+
+def test_an_unrelated_permission_does_not_open_the_door(mixed_registry):
+    writer = Caller(user_id="writer", permissions=frozenset({"files.write"}))
+
+    assert [q for q, _ in mixed_registry.list_for(writer)] == ["math.calculator"]
+    with pytest.raises(PermissionDeniedError):
+        dispatch(mixed_registry, "fs.read", caller=writer)
+
+
+def test_list_all_is_unfiltered(mixed_registry):
+    """Diagnostics still need to see every tool, permissions notwithstanding."""
+    assert [q for q, _ in mixed_registry.list_all()] == ["math.calculator", "fs.read"]
+
+
+def test_dispatch_runs_the_tool_for_a_caller_who_holds_the_permission(mixed_registry):
+    assert dispatch(mixed_registry, "fs.read", caller=READER) == "fs:read"
+
+
+def test_dispatch_refuses_a_caller_who_does_not(mixed_registry):
+    with pytest.raises(PermissionDeniedError):
+        dispatch(mixed_registry, "fs.read", caller=ANYONE)
+
+
+def test_a_denied_call_never_reaches_the_provider(registry):
+    """The point of the whole exercise: the tool body must not run."""
+    provider = FakeProvider("fs", ["write"], permission="files.write")
+    registry.register(provider)
+
+    with pytest.raises(PermissionDeniedError):
+        dispatch(registry, "fs.write", {"path": "/etc/passwd"}, caller=READER)
+
+    assert provider.calls == []
+
+
+def test_a_public_tool_still_works_for_a_caller_with_no_permissions(mixed_registry):
+    assert dispatch(mixed_registry, "math.calculator", caller=ANYONE) == "math:calculator"
+
+
+def test_permission_is_checked_before_the_arguments_are(mixed_registry):
+    """A caller who may not use a tool gets a flat refusal — not a schema
+    critique that maps out the arguments of a tool they cannot reach."""
+    registry = ToolRegistry()
+    registry.register(FakeProvider("fs", ["read"], schema=CALC_SCHEMA, permission="files.read"))
+
+    with pytest.raises(PermissionDeniedError):
+        dispatch(registry, "fs.read", {"expression": 5}, caller=ANYONE)
+
+
+def test_an_unknown_tool_is_still_unknown_not_denied(mixed_registry):
+    """Order matters the other way too: 'no such tool' outranks 'not allowed'."""
+    with pytest.raises(UnknownToolError):
+        dispatch(mixed_registry, "fs.nope", caller=ANYONE)
+
+
+def test_the_denial_names_the_caller_and_the_permission(mixed_registry):
+    """Not for the model — for whoever reads the log after a refusal."""
+    with pytest.raises(PermissionDeniedError) as excinfo:
+        dispatch(mixed_registry, "fs.read", caller=ANYONE)
+
+    message = str(excinfo.value)
+    assert "anonymous" in message
+    assert "files.read" in message
+    assert "fs.read" in message

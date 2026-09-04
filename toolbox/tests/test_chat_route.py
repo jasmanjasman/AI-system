@@ -5,12 +5,16 @@ deliberately. They will flip to XPASS the moment chat.py handles them.
 """
 import pytest
 
+from fastapi.testclient import TestClient
+
 from app.adapters.llama_client import LlamaClientError
+from app.main import app as fastapi_app
 from app.routes import chat as chat_routes
+from app.tools.caller import Caller
 from app.tools.contracts import ToolProvider, ToolSpec
 from app.tools.providers.calculator import CalculatorProvider
 from app.tools.registry import ToolRegistry
-from conftest import tool_call
+from conftest import FakeLlamaClient, tool_call
 
 
 class _EchoProvider(ToolProvider):
@@ -80,7 +84,7 @@ def test_menu_uses_namespaced_names_from_the_registry():
     registry = ToolRegistry()
     registry.register(CalculatorProvider())
 
-    menu = chat_routes._build_menu(registry)
+    menu = chat_routes._build_menu(registry, Caller.anonymous())
 
     assert [entry["function"]["name"] for entry in menu] == ["math.calculator"]
     assert menu[0]["type"] == "function"
@@ -99,3 +103,92 @@ def test_route_serves_a_provider_it_was_never_told_about(monkeypatch, chat_clien
 
     assert response.status_code == 200
     assert echo.calls == [("say", {"text": "hi"})]
+
+
+class _SecretProvider(ToolProvider):
+    """A restricted provider, to prove the route honours the boundary."""
+
+    def __init__(self):
+        self.calls = []
+
+    @property
+    def namespace(self):
+        return "secret"
+
+    def list_tools(self):
+        return [
+            ToolSpec(
+                name="read",
+                description="Read the secret.",
+                input_schema={"type": "object"},
+                required_permission="secrets.read",
+            )
+        ]
+
+    async def call(self, tool_name, args):
+        self.calls.append((tool_name, args))
+        return "the secret"
+
+
+def _registry_with_a_secret():
+    registry = ToolRegistry()
+    registry.register(CalculatorProvider())
+    registry.register(_SecretProvider())
+    return registry
+
+
+def test_menu_offers_only_what_the_caller_may_use():
+    """No point showing the model a tool whose every call would be refused."""
+    registry = _registry_with_a_secret()
+
+    anyone = chat_routes._build_menu(registry, Caller.anonymous())
+    holder = chat_routes._build_menu(registry, Caller("agent", frozenset({"secrets.read"})))
+
+    assert [e["function"]["name"] for e in anyone] == ["math.calculator"]
+    assert [e["function"]["name"] for e in holder] == ["math.calculator", "secret.read"]
+
+
+def test_a_tool_the_model_was_not_shown_is_refused_not_run(monkeypatch, chat_client):
+    """The menu is a hint; a model can still name a tool it never saw."""
+    registry = _registry_with_a_secret()
+    monkeypatch.setattr(chat_routes, "get_registry", lambda: registry)
+    monkeypatch.setattr(chat_routes, "get_caller", Caller.anonymous)
+
+    response = chat_client(tool_call("secret.read", {}))
+
+    assert response.status_code == 200
+    assert registry._providers["secret"].calls == []
+
+
+def test_the_refusal_does_not_leak_the_permission_name(monkeypatch):
+    """What the model is told: the door is shut. Not which key it wants."""
+    tool_replies = []
+
+    class Recorder(FakeLlamaClient):
+        async def chat_with_tools(self, messages, tools):
+            tool_replies.extend(m for m in messages if m.get("role") == "tool")
+            return await super().chat_with_tools(messages, tools)
+
+    monkeypatch.setattr(chat_routes, "get_registry", _registry_with_a_secret)
+    monkeypatch.setattr(chat_routes, "get_caller", Caller.anonymous)
+    monkeypatch.setattr(
+        chat_routes, "get_llama_client", lambda: Recorder(tool_call("secret.read", {}))
+    )
+
+    with TestClient(fastapi_app) as client:
+        client.post("/chat", json={"prompt": "irrelevant"})
+
+    (refusal,) = tool_replies
+    assert refusal["content"] == "permission denied: secret.read"
+    assert "secrets.read" not in refusal["content"]
+
+
+def test_a_permitted_call_runs_through_the_route(monkeypatch, chat_client):
+    registry = _registry_with_a_secret()
+    monkeypatch.setattr(chat_routes, "get_registry", lambda: registry)
+    monkeypatch.setattr(chat_routes, "get_caller", lambda: Caller("agent", frozenset({"secrets.read"})))
+
+    response = chat_client(tool_call("secret.read", {}))
+
+    assert response.status_code == 200
+    assert registry._providers["secret"].calls == [("read", {})]
